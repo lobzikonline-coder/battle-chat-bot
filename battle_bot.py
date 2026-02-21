@@ -11,9 +11,8 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-
-BOT_TOKEN = "7957872868:AAEKNNix_70UF6CwqQh-49M1SCt
-im fNhBg4"
+import os
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 TZ = ZoneInfo("Europe/Uzhgorod")
 POST_AT = time(21, 0, tzinfo=TZ)
 
