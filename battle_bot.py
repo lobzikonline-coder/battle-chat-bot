@@ -17,13 +17,41 @@ from aiohttp import web
 
 
 # =========================
+# SAFE ENV HELPERS
+# =========================
+def getenv_str(key: str, default: str = "") -> str:
+    val = os.getenv(key)
+    if val is None:
+        return default
+    return val.strip()
+
+
+def getenv_int(key: str, default: int = 0) -> int:
+    val = os.getenv(key)
+    if val is None:
+        return default
+    val = val.strip()
+    if val == "":
+        return default
+    try:
+        return int(val)
+    except ValueError:
+        return default
+
+
+# =========================
 # ENV
 # =========================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-REPORT_CHAT_ID = int(os.getenv("REPORT_CHAT_ID", "0"))
-REPORT_THREAD_ID = int(os.getenv("REPORT_THREAD_ID", "0"))
-COUNT_CHAT_ID = os.getenv("COUNT_CHAT_ID")  # якщо хочеш рахувати тільки в одному чаті
-PORT = int(os.getenv("PORT", "10000"))
+BOT_TOKEN = getenv_str("BOT_TOKEN", "")
+REPORT_CHAT_ID = getenv_int("REPORT_CHAT_ID", 0)
+REPORT_THREAD_ID = getenv_int("REPORT_THREAD_ID", 0)
+
+# якщо хочеш рахувати тільки в одному чаті (якщо порожнє — вважаємо що нема)
+COUNT_CHAT_ID = getenv_str("COUNT_CHAT_ID", "")
+if COUNT_CHAT_ID == "":
+    COUNT_CHAT_ID = None
+
+PORT = getenv_int("PORT", 10000)
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
@@ -54,7 +82,7 @@ def display_name(update: Update):
 def should_count(update: Update):
     if COUNT_CHAT_ID is None:
         return True
-    return str(update.effective_chat.id) == COUNT_CHAT_ID
+    return str(update.effective_chat.id) == str(COUNT_CHAT_ID)
 
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -119,11 +147,13 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
     if REPORT_CHAT_ID == 0:
         return
 
+    thread_id = REPORT_THREAD_ID if REPORT_THREAD_ID != 0 else None
+
     if os.path.exists(REPORT_IMAGE_PATH):
         with open(REPORT_IMAGE_PATH, "rb") as f:
             await context.bot.send_photo(
                 chat_id=REPORT_CHAT_ID,
-                message_thread_id=REPORT_THREAD_ID if REPORT_THREAD_ID != 0 else None,
+                message_thread_id=thread_id,
                 photo=f,
                 caption=text,
                 parse_mode="HTML",
@@ -131,7 +161,7 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
     else:
         await context.bot.send_message(
             chat_id=REPORT_CHAT_ID,
-            message_thread_id=REPORT_THREAD_ID if REPORT_THREAD_ID != 0 else None,
+            message_thread_id=thread_id,
             text=text,
             parse_mode="HTML",
         )
@@ -143,7 +173,8 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
 
 async def test_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_daily_report(context)
-    await update.message.reply_text("Звіт відправлено.")
+    if update.message:
+        await update.message.reply_text("Звіт відправлено.")
 
 
 # =========================
