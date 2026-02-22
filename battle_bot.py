@@ -101,8 +101,12 @@ async def post_report(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
         "Завтра — новий раунд."
     )
 
-    await context.bot.send_message(chat_id=chat_id, text=message)
-    counts_by_chat[chat_id].clear()
+    await context.bot.send_message(
+    chat_id=-1001825943882,
+    text=message,
+    message_thread_id=47455
+)
+    counts_by_chat.clear()
 
 
 async def daily_job(context: ContextTypes.DEFAULT_TYPE):
