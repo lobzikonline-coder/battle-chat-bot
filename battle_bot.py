@@ -1,6 +1,6 @@
 import os
 import asyncio
-from datetime import datetime, time
+from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
 from collections import defaultdict
 
@@ -13,45 +13,14 @@ from telegram.ext import (
     filters,
 )
 
-from aiohttp import web
-
-
-# =========================
-# SAFE ENV HELPERS
-# =========================
-def getenv_str(key: str, default: str = "") -> str:
-    val = os.getenv(key)
-    if val is None:
-        return default
-    return val.strip()
-
-
-def getenv_int(key: str, default: int = 0) -> int:
-    val = os.getenv(key)
-    if val is None:
-        return default
-    val = val.strip()
-    if val == "":
-        return default
-    try:
-        return int(val)
-    except ValueError:
-        return default
-
-
 # =========================
 # ENV
 # =========================
-BOT_TOKEN = getenv_str("BOT_TOKEN", "")
-REPORT_CHAT_ID = getenv_int("REPORT_CHAT_ID", 0)
-REPORT_THREAD_ID = getenv_int("REPORT_THREAD_ID", 0)
-
-# якщо хочеш рахувати тільки в одному чаті (якщо порожнє — вважаємо що нема)
-COUNT_CHAT_ID = getenv_str("COUNT_CHAT_ID", "")
-if COUNT_CHAT_ID == "":
-    COUNT_CHAT_ID = None
-
-PORT = getenv_int("PORT", 10000)
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+REPORT_CHAT_ID = int(os.getenv("REPORT_CHAT_ID", "0"))
+REPORT_THREAD_ID = int(os.getenv("REPORT_THREAD_ID", "0"))
+COUNT_CHAT_ID = os.getenv("COUNT_CHAT_ID")  # якщо хочеш рахувати тільки в одному чаті
+PORT = int(os.getenv("PORT", "10000"))
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
@@ -147,13 +116,11 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
     if REPORT_CHAT_ID == 0:
         return
 
-    thread_id = REPORT_THREAD_ID if REPORT_THREAD_ID != 0 else None
-
     if os.path.exists(REPORT_IMAGE_PATH):
         with open(REPORT_IMAGE_PATH, "rb") as f:
             await context.bot.send_photo(
                 chat_id=REPORT_CHAT_ID,
-                message_thread_id=thread_id,
+                message_thread_id=REPORT_THREAD_ID if REPORT_THREAD_ID != 0 else None,
                 photo=f,
                 caption=text,
                 parse_mode="HTML",
@@ -161,7 +128,7 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
     else:
         await context.bot.send_message(
             chat_id=REPORT_CHAT_ID,
-            message_thread_id=thread_id,
+            message_thread_id=REPORT_THREAD_ID if REPORT_THREAD_ID != 0 else None,
             text=text,
             parse_mode="HTML",
         )
@@ -178,21 +145,34 @@ async def test_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# RENDER WEB SERVER
+# MINIMAL WEB SERVER (Render-friendly, no aiohttp)
 # =========================
-async def health(request):
-    return web.Response(text="OK")
+async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    try:
+        # прочитати перший пакет (нам не важливо що саме)
+        await reader.read(1024)
+        body = b"OK"
+        resp = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: text/plain; charset=utf-8\r\n"
+            b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+            b"Connection: close\r\n"
+            b"\r\n" + body
+        )
+        writer.write(resp)
+        await writer.drain()
+    finally:
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
 
 
 async def run_web_server():
-    app = web.Application()
-    app.router.add_get("/", health)
-
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
+    server = await asyncio.start_server(handle_http, "0.0.0.0", PORT)
     print(f"[WEB] Listening on {PORT}")
+    return server
 
 
 # =========================
@@ -210,11 +190,11 @@ async def main():
     # щодня о 21:00 по Києву
     application.job_queue.run_daily(
         send_daily_report,
-        time=time(21, 0, tzinfo=KYIV_TZ),
+        time=dtime(21, 0, tzinfo=KYIV_TZ),
         name="daily_podium",
     )
 
-    await run_web_server()
+    web_server = await run_web_server()
 
     await application.initialize()
     await application.start()
@@ -222,7 +202,11 @@ async def main():
 
     print("[BOT] Started")
 
-    await asyncio.Event().wait()
+    try:
+        await asyncio.Event().wait()
+    finally:
+        web_server.close()
+        await web_server.wait_closed()
 
 
 if __name__ == "__main__":
