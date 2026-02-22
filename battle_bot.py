@@ -52,7 +52,13 @@ def user_key(update: Update) -> str:
 
 
 async def chatid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"chat_id: {update.effective_chat.id}")
+    chat_id = update.effective_chat.id
+thread_id = update.message.message_thread_id
+
+await update.message.reply_text(
+    f"chat_id: {chat_id}\n"
+    f"thread_id: {thread_id}"
+)
 
 
 async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
