@@ -1,7 +1,5 @@
 import os
 import logging
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from collections import defaultdict
 from datetime import time
 from zoneinfo import ZoneInfo
@@ -16,53 +14,39 @@ from telegram.ext import (
 )
 
 # =========================
-# Render keep-alive (простий HTTP сервер)
+# НАЛАШТУВАННЯ (ТВОЇ ДАНІ)
 # =========================
-def start_port_listener():
-    port = int(os.environ.get("PORT", "10000"))
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
+# Куди САМЕ писати щоденний звіт (одна конкретна "гілка"/топік у групі)
+REPORT_CHAT_ID = int(os.getenv("REPORT_CHAT_ID", "-1001825943882"))
+REPORT_THREAD_ID = int(os.getenv("REPORT_THREAD_ID", "47455"))
 
-        def log_message(self, format, *args):
-            return  # щоб не спамило логами
+# Час звіту
+TZ = ZoneInfo(os.getenv("TZ", "Europe/Uzhgorod"))
+POST_AT = time(21, 0, tzinfo=TZ)
 
-    server = HTTPServer(("0.0.0.0", port), Handler)
-    server.serve_forever()
+# URL твого Render-сервісу (важливо для webhook!)
+# Приклад: https://battle-chat-bot.onrender.com
+PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
 
+# Якщо хочеш картинку-шаблон у звіт:
+# 1) закинь картинку в репозиторій як report_template.png (в корінь поруч з battle_bot.py)
+# 2) увімкни USE_REPORT_IMAGE=1
+USE_REPORT_IMAGE = os.getenv("USE_REPORT_IMAGE", "0") == "1"
 
 # =========================
-# CONFIG
+# ЛОГИ
 # =========================
 logging.basicConfig(level=logging.INFO)
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set in environment variables!")
-
-# Куди постимо звіт (твоя “одна гілка”)
-TARGET_CHAT_ID = int(os.getenv("TARGET_CHAT_ID", "-1001825943882"))
-TARGET_THREAD_ID = int(os.getenv("TARGET_THREAD_ID", "47455"))
-
-# Час щоденного звіту
-TZ = ZoneInfo(os.getenv("TZ_NAME", "Europe/Uzhgorod"))
-POST_AT = time(
-    int(os.getenv("POST_HOUR", "21")),
-    int(os.getenv("POST_MINUTE", "0")),
-    tzinfo=TZ
-)
-
-# Файл картинки (має бути в репозиторії)
-PODIUM_IMAGE = os.getenv("PODIUM_IMAGE", "zimin_cargo_podium.png")
+log = logging.getLogger("battle-bot")
 
 # =========================
-# STORAGE (рахуємо по всіх чатах, один загальний рейтинг)
+# ПАМʼЯТЬ (рахуємо за день)
 # =========================
-counts_global = defaultdict(int)  # { "username/fullname": count }
-last_leader = None
+# Рахуємо ВСІ повідомлення в будь-яких гілках/топіках.
+# Якщо у тебе 1 група з темами — цього достатньо.
+counts_global = defaultdict(int)  # user -> count
 
 
 def user_key(update: Update) -> str:
@@ -71,125 +55,181 @@ def user_key(update: Update) -> str:
         return "Unknown"
     if u.username:
         return f"@{u.username}"
-    # full_name може бути None — підстрахуємося
     return (u.full_name or "Unknown").strip()
 
 
-async def chatid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показує chat_id і thread_id поточної точки"""
-    chat_id = update.effective_chat.id if update.effective_chat else None
-    thread_id = getattr(update.message, "message_thread_id", None) if update.message else None
-
-    await update.message.reply_text(
-        f"chat_id: {chat_id}\nthread_id: {thread_id}"
-    )
-
-
 async def count_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Рахує всі повідомлення за день по всіх чатах."""
-    if not update.effective_user:
-        return
-    # не рахуємо ботів
-    if update.effective_user.is_bot:
-        return
-    # інколи update.message може бути None (наприклад, service updates)
-    if not update.message:
+    """Рахує кожне повідомлення (крім ботів)."""
+    if not update.effective_user or update.effective_user.is_bot:
         return
 
-    key = user_key(update)
-    counts_global[key] += 1
+    chat = update.effective_chat
+    if not chat:
+        return
+
+    # Рахуємо тільки групи/супергрупи (щоб приватні чати не лізли в рейтинг)
+    if chat.type not in ("group", "supergroup"):
+        return
+
+    user = user_key(update)
+    counts_global[user] += 1
 
 
-def build_status_line(new_leader: str) -> str:
-    global last_leader
-    if last_leader is None:
-        last_leader = new_leader
-        return "🆕 Новий чемпіон."
-    if last_leader == new_leader:
-        return "🛡️ Захистив трон."
-    last_leader = new_leader
-    return "🔁 Зміна лідера."
+def build_report_text(top_items: list[tuple[str, int]]) -> str:
+    # Твій стиль: стримано, товарно, але з мотивацією
+    # Без команд, без зайвих знаків
+    header = "🇨🇳 Zimin Cargo • Склад закрито\n\n"
+    header += "Обʼєм повідомлень пораховано.\n"
+    header += "Вага зафіксована.\n\n"
+
+    podium = ""
+    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+    for i, (name, cnt) in enumerate(top_items):
+        medal = medals[i] if i < len(medals) else "•"
+        podium += f"{medal} {name} — {cnt}\n"
+
+    max_cnt = top_items[0][1] if top_items else 0
+
+    footer = "\n"
+    footer += f"Сьогоднішній максимум — {max_cnt} повідомлень.\n\n"
+    footer += "Підсумок формується щодня о 21:00.\n"
+    footer += "Рахуються всі повідомлення за день.\n\n"
+    footer += "Завтра склад відкривається з нуля.\n"
+    footer += "І обʼєм знову вирішує."
+
+    return header + podium + footer
 
 
-async def post_report(context: ContextTypes.DEFAULT_TYPE):
-    """Формує і відправляє щоденний звіт в ОДНУ гілку, потім обнуляє."""
+async def post_report(app: Application):
+    """Надіслати звіт в ОДНУ конкретну гілку + обнулити лічильники."""
     if not counts_global:
-        # Навіть якщо ніхто не писав — можна не постити взагалі.
-        # Якщо хочеш постити "0" — скажи, зроблю.
+        # Нема активності — можна або мовчати, або дати короткий "склад пустий"
+        text = (
+            "🇨🇳 Zimin Cargo • Склад закрито\n\n"
+            "Сьогодні склад був тихий.\n"
+            "Обʼєм майже нульовий.\n\n"
+            "Завтра відкриваємось з нуля.\n"
+            "І обʼєм знову вирішує."
+        )
+        await app.bot.send_message(
+            chat_id=REPORT_CHAT_ID,
+            message_thread_id=REPORT_THREAD_ID,
+            text=text,
+        )
         return
 
-    top = sorted(counts_global.items(), key=lambda x: x[1], reverse=True)
-    leader_name, leader_cnt = top[0]
-    status_line = build_status_line(leader_name)
+    top = sorted(counts_global.items(), key=lambda x: x[1], reverse=True)[:5]
+    text = build_report_text(top)
 
-    medals = ["🥇", "🥈", "🥉"]
-
-    message = ""
-    message += "🇨🇳 Zimin Cargo • Склад закрито\n\n"
-    message += "Обʼєм повідомлень пораховано.\n"
-    message += "Вага зафіксована.\n\n"
-
-    for i, (name, cnt) in enumerate(top[:3]):
-        message += f"{medals[i]} {name} — {cnt}\n"
-
-    message += f"\nСьогоднішній максимум — {leader_cnt} повідомлень.\n\n"
-    message += "Підсумок формується щодня о 21:00.\n"
-    message += "Рахуються всі повідомлення за день.\n\n"
-    message += "Завтра склад відкривається з нуля.\n"
-    message += "І обʼєм знову вирішує.\n\n"
-    message += f"{status_line}"
-
-    # Надсилаємо фото + caption
-    try:
-        with open(PODIUM_IMAGE, "rb") as photo:
-            await context.bot.send_photo(
-                chat_id=TARGET_CHAT_ID,
-                photo=photo,
-                caption=message,
-                message_thread_id=TARGET_THREAD_ID,
-            )
-    except FileNotFoundError:
-        # Якщо картинки нема — просто відправляємо текстом (щоб звіт не зірвався)
-        await context.bot.send_message(
-            chat_id=TARGET_CHAT_ID,
-            text=message,
-            message_thread_id=TARGET_THREAD_ID,
+    if USE_REPORT_IMAGE and PUBLIC_URL:
+        # Надсилаємо картинку як "шапку" + текст
+        # Картинка лежить у репі як report_template.png і віддається через /report.png
+        photo_url = f"{PUBLIC_URL}/report.png"
+        await app.bot.send_photo(
+            chat_id=REPORT_CHAT_ID,
+            message_thread_id=REPORT_THREAD_ID,
+            photo=photo_url,
+            caption=text,
+        )
+    else:
+        await app.bot.send_message(
+            chat_id=REPORT_CHAT_ID,
+            message_thread_id=REPORT_THREAD_ID,
+            text=text,
         )
 
-    # ОБНУЛЯЄМО НА НОВИЙ ДЕНЬ
     counts_global.clear()
 
 
-async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ручний запуск звіту (/report)"""
-    await post_report(context)
-
-
 async def daily_job(context: ContextTypes.DEFAULT_TYPE):
-    """Щоденний джоб о 21:00"""
-    await post_report(context)
+    await post_report(context.application)
 
 
-def main():
-    # Keep-alive для Render
-    threading.Thread(target=start_port_listener, daemon=True).start()
+# =========================
+# WEBHOOK HANDLERS (Render)
+# =========================
+from telegram.request import HTTPXRequest
+from telegram.ext import ApplicationBuilder
+from telegram.ext.webhookhandler import WebhookHandler
+from aiohttp import web
 
-    app = Application.builder().token(BOT_TOKEN).build()
 
-    # Команди
-    app.add_handler(CommandHandler("chatid", chatid_cmd))
-    app.add_handler(CommandHandler("report", report_cmd))
+async def health(request):
+    return web.Response(text="OK", content_type="text/plain")
 
-    # Рахуємо ВСІ повідомлення (текст/медіа/стікери — все)
-    app.add_handler(MessageHandler(filters.ALL, count_all))
 
-    # Щоденний звіт
-    app.job_queue.run_daily(daily_job, time=POST_AT)
+async def report_image(request):
+    # Віддаємо локальну картинку-шаблон (якщо ти її додаси в репозиторій)
+    # Файл: report_template.png
+    path = os.path.join(os.path.dirname(__file__), "report_template.png")
+    if not os.path.exists(path):
+        return web.Response(status=404, text="No template image")
+    return web.FileResponse(path)
 
-    # Старт
-    # drop_pending_updates=True прибирає “хвіст” апдейтів після перезапуску
-    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+
+def build_app() -> Application:
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN is empty. Add it in Render Environment Variables.")
+
+    request = HTTPXRequest(connect_timeout=10, read_timeout=30, write_timeout=30, pool_timeout=30)
+    application = Application.builder().token(BOT_TOKEN).request(request).build()
+
+    # Команди для діагностики (можеш не використовувати; на роботу звіту не впливає)
+    async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text("Працюю ✅")
+
+    async def testreport_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await post_report(context.application)
+
+    application.add_handler(CommandHandler("ping", ping_cmd))
+    application.add_handler(CommandHandler("testreport", testreport_cmd))
+
+    # Рахуємо всі повідомлення
+    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, count_all))
+
+    # Щоденний звіт о 21:00
+    application.job_queue.run_daily(daily_job, time=POST_AT)
+
+    return application
+
+
+async def main():
+    if not PUBLIC_URL:
+        raise RuntimeError("PUBLIC_URL is empty. Add it in Render Environment Variables.")
+
+    port = int(os.environ.get("PORT", "10000"))
+    application = build_app()
+
+    # aiohttp server
+    app = web.Application()
+    app.router.add_get("/", health)
+    app.router.add_get("/report.png", report_image)
+
+    webhook_path = "/telegram"
+    webhook_url = f"{PUBLIC_URL}{webhook_path}"
+
+    # Telegram webhook handler
+    webhook_handler = WebhookHandler(application, webhook_path)
+    webhook_handler.register(app)
+
+    # Set webhook (важливо: remove old webhook/polling conflicts)
+    await application.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+
+    await application.initialize()
+    await application.start()
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+    log.info("Webhook listening on %s, health: %s", port, PUBLIC_URL)
+
+    # тримаємо процес живим
+    while True:
+        await asyncio.sleep(3600)
 
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    asyncio.run(main())
